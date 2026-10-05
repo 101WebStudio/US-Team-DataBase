@@ -319,7 +319,7 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 14px -apple-s
   <!-- ================= SCRIPTS ================= -->
   <script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-auth-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-database-compat.js"></script>
   <script>
 /* ==========================================================
    US-TEAM Database - app.js
@@ -633,9 +633,9 @@ function exportCSV() {
 }
 
 /* ---------- 8. FIREBASE: TEAM PASSWORD + LIVE SYNC ---------- */
-/* Data lives in Firestore (usteam_data/main), so every device that
+/* Data lives in Realtime Database (usteam_data/main), so every device that
    signs in sees the same data. localStorage is only an offline copy. */
-const fb = { doc: null, unsub: null, ready: false, applying: false, timer: null, user: null };
+const fb = { ref: null, listener: null, pushing: false, ready: false, applying: false, timer: null, user: null };
 
 function syncStatus(s) { const el = $('#cloudState'); if (el) el.textContent = s; }
 
@@ -660,26 +660,32 @@ function applyFirebaseState(state) {
 }
 
 async function pushFirebaseState() {
-  if (!fb.ready || !fb.doc) return;
+  if (!fb.ready || !fb.ref) return;
   try {
-    if (new Blob([JSON.stringify(db)]).size > 900000) { syncStatus('Firestore size limit'); return; }
-    await fb.doc.set({ state: db, updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+    fb.pushing = true;
+    const p = fb.ref.set({ state: JSON.parse(JSON.stringify(db)), updatedAt: firebase.database.ServerValue.TIMESTAMP });
+    fb.pushing = false; /* local echo fires synchronously inside set() */
+    await p;
     syncStatus('Live · synced');
-  } catch (e) { console.error('Firebase save failed:', e); syncStatus('Sync error'); }
+  } catch (e) { fb.pushing = false; console.error('Firebase save failed:', e); syncStatus('Sync error'); }
 }
 
 function startFirebaseSync() {
   stopFirebaseSync();
-  fb.doc = firebase.firestore().collection('usteam_data').doc('main');
-  fb.unsub = fb.doc.onSnapshot(snap => {
-    if (snap.metadata.hasPendingWrites) return;
-    if (snap.exists) {
-      const state = snap.data()?.state;
+  fb.ref = firebase.database().ref('usteam_data/main');
+  fb.listener = fb.ref.on('value', snap => {
+    if (fb.pushing) return;
+    if (snap.exists()) {
+      const state = snap.val()?.state;
       if (state) { applyFirebaseState(state); fb.ready = true; syncStatus('Live · synced'); }
     } else if (!fb.ready) { fb.ready = true; pushFirebaseState(); }
-  }, e => { fb.ready = false; console.error('Firebase connection failed:', e); syncStatus(e.code === 'permission-denied' ? 'Check Firestore rules' : 'Firebase setup needed'); });
+  }, e => { fb.ready = false; console.error('Firebase connection failed:', e); syncStatus(/permission/i.test((e.code || '') + e.message) ? 'Check database rules' : 'Firebase setup needed'); });
 }
-function stopFirebaseSync() { if (fb.unsub) fb.unsub(); fb.unsub = null; fb.ready = false; }
+
+function stopFirebaseSync() {
+  if (fb.ref && fb.listener) fb.ref.off('value', fb.listener);
+  fb.ref = null; fb.listener = null; fb.ready = false;
+}
 
 function passwordForm(msg = '') {
   show(`<h2>Team password</h2><p class="note" style="font-size:13px">Enter the US-TEAM password to open the shared database.</p>${msg ? `<p class="note" style="color:var(--red);font-size:12px">${esc(msg)}</p>` : ''}<div class="field"><input id="teamPw" type="password" placeholder="Password" onkeydown="if(event.key==='Enter')teamLogin()"></div><div class="buttons"><button class="btn primary" onclick="teamLogin()">Open</button></div>`);
@@ -692,12 +698,12 @@ function teamLogin() {
 function teamLogout() { hideModal(); firebase.auth().signOut(); }
 
 function firebaseInfo() {
-  show(`<h2>Firebase sync</h2><p class="note">Project: us-team-aeb98</p><p class="note">Status: <b>${esc($('#cloudState')?.textContent || 'Connecting')}</b></p><p class="note">Data is stored in Cloud Firestore and updates live on every device that enters the team password.</p><div class="buttons"><button class="btn" onclick="teamLogout()">Lock</button><button class="btn" onclick="hideModal()">Close</button></div>`);
+  show(`<h2>Firebase sync</h2><p class="note">Project: us-team-aeb98</p><p class="note">Status: <b>${esc($('#cloudState')?.textContent || 'Connecting')}</b></p><p class="note">Data is stored in Firebase Realtime Database and updates live on every device that enters the team password.</p><div class="buttons"><button class="btn" onclick="teamLogout()">Lock</button><button class="btn" onclick="hideModal()">Close</button></div>`);
 }
 
 function startCloud() {
   try {
-    if (!window.firebase?.initializeApp || !firebase.auth || !firebase.firestore) { syncStatus('Firebase SDK not loaded'); return; }
+    if (!window.firebase?.initializeApp || !firebase.auth || !firebase.database) { syncStatus('Firebase SDK not loaded'); return; }
     if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
     firebase.auth().onAuthStateChanged(user => {
       if (user) { hideModal(); syncStatus('Connecting...'); startFirebaseSync(); }
